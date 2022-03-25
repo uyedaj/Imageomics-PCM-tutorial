@@ -1,0 +1,251 @@
+---
+title: "Introduction to Phylogenetic Trait Biology"
+author: "Josef Uyeda"
+date: "3/20/2022"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Installing Packages
+R is the primary ecosystem for phylogenetic comparative analyses of trait evolution, while phylogenetics usually uses stand-alone software. There are a number of packages available for modeling trait evolution that exist within R, we will install and use a few of them.
+
+```{r, message=FALSE}
+#install.packages("mvMORPH")
+#install.packages("geomorph")
+#install.packages("geiger")
+#install.packages("phylolm")
+#install.packages("Rphylopars")
+#install.packages("phytools")
+#install.packages("treeplyr")
+library(phytools)
+library(phylolm)
+library(Rphylopars)
+library(treeplyr)
+library(geomorph)
+library(mvMORPH)
+```
+The lines below install the CRAN phylogenetics task view, which is a comprehensive list of all phylogenetics packages. Don't run this line unless you want to install all of them and wait for at least 30 minutes while they install. The full list can be found here: https://cran.r-project.org/web/views/Phylogenetics.html
+
+
+```{r eval=FALSE}
+#install.packages("ctv")
+#install.views("Phylogenetics")
+```
+
+
+## Phylogenetic signal & Brownian Motion
+
+The base model for most phylogenetic models of continuous trait evolution is Brownian Motion. We can simulate Brownian motion on a tree after loading it into R. We will use a tree and data taken from geometric morphometric landmarking of images of fruit fly (Drosophila) wings from over 100 species that was compiled for a by Houle et al. 2017 ().
+
+```{r} 
+tree <- readRDS("../data/HouleTree.rds") # Load in Drosophila tree used in Houle et al. 2017
+houledat <- read.csv("../data/SpeciesNature.csv") # Data on drosophila wing shape from Houle et al. 2017. 
+
+tree
+head(houledat)
+```
+Let's plot the landmark data to see what this data represents. 
+
+```{r}
+plot(0,0, type="n", xlim=c(-600, 600), ylim=c(-400, 400), xaxt="n", yaxt="n", xlab="", ylab="")
+
+for(i in seq(4,27, 2)){
+  points(houledat[,i], houledat[,i+1], pch=".", col=as.numeric(factor(houledat$Species)))
+}
+```
+
+Each individual fly wing is plotted with 12 points representing shared landmarks (usually intersection of wing veins), aligned with other images, with size removed. Different colors represent different species.
+
+Let's focus initially on a single trait, the overall size of the wing (which was removed from the previous plot). In the dataset this is represented by log centroid size, or `lncs`. We'll use `dplyr` verbs and the phylogenetic name matching wrapper `treeplyr` to match the list of taxa to the tree, and plot it.  
+
+```{r}
+.houledat <- dplyr::select(houledat, Species, lncs) %>% group_by(Species) %>% summarize(mean.lncs = mean(lncs))
+
+td <- make.treedata(tree, .houledat)
+phenogram(td$phy, td[['mean.lncs']], ftype="off", ylab="Ln Centroid Size")
+```
+This plot is called a trait- or pheno-gram and shows the trait on the y-axis and the phylogenetic tree going from the root to the tip in millions of years. Does this trait have phylogenetic signal? We can test phylogenetic signal with various methods, one of the most common is called Pagel's Lambda. 
+
+```{r}
+phylosig(td$phy, td[['mean.lncs']], method = "lambda", test=TRUE)
+```
+A lambda value of 1 indicates that the amount of phylogenetic signal is the same as what's expected under Brownian Motion, while a value of 0 would indicate that there is no phylogenetic structure in the data. What do we conclude? 
+The meaning of phylogenetic signal can perhaps be better understood as the predictability of unobserved taxa. For example, let's delete a single species, and predict what it's value should be under Brownian Motion. 
+
+```{r}
+i <- 17 #sample(1:length(td$phy$tip.label), 1)
+td$phy$tip.label[i]
+
+.delete1Dat <- data.frame("species"=td$phy$tip.label, mean.lncs=td$dat$mean.lncs)
+.delete1Dat$mean.lncs[i] <- NA
+
+BMfit <- phylopars(.delete1Dat, td$phy, model="BM")
+
+summary(BMfit)
+
+```
+
+```{r}
+phenogram(td$phy, td[['mean.lncs']], ftype="off", xlim=c(0,60))
+d <- list()
+d <- dnorm(0:200, mean=BMfit$anc_recon[i,1], sd=sqrt(BMfit$anc_var[i,1]))
+
+polygon(35 + d*50, 0:200, col="red")
+abline(h=td$dat$mean.lncs[i], lty=2, lwd=2)
+
+```
+In other words, high phylogenetic signal means that we can predict the trait values of related species even if we lack data on that species. Traits with high phylogenetic signal place a high prior on what the trait values should be in related species. 
+
+One issue however, is that it is very easy to lose phylogenetic signal simply because of a few taxa that are outliers. 
+
+```{r}
+.ssp <- 24
+.outlierdat <- td[['mean.lncs']]
+.outlierdat[.ssp] #original value
+.outlierdat[.ssp] <- 100 + .outlierdat[i] #try varying how big the outlier is, from 100 to 1000
+
+phenogram(td$phy, .outlierdat, ftype="off", xlim=c(0,60))
+
+phylosig(td$phy, .outlierdat, method = "lambda", test=TRUE)
+```
+In this example, we need to make our 1 taxon a pretty big outlier to take away significant phylogenetic signal, but since the expected change is proportional to branch length, species on shorter branches can be relatively slight it's easier to do when the species is on a shorter terminal branch. 
+
+The following code simply takes 0 length edges and makes them a small value, and specifies the number of landmarks (p), their dimensionality (k) and the number of taxa (ntaxa) for use later.
+
+```{r}
+td$phy$edge.length[td$phy$edge.length==0] <- 0.1
+
+p <- 12
+k <- 2
+ntaxa <- length(td$phy$tip.label)
+```
+
+
+## Analysis of shape of evolution
+
+
+The biological motivation for the Drosophila wing shape data is that this trait is an example of stasis -- a trait staying very constant for millions of years. Humans have trouble distinguishing species based on the subtle differences in wing shape, but machines have no trouble doing so -- as there is significant phylogenetic signal in the shape of the wings. Furthermore, there is a great interest in the dynamics of evolution for this trait -- particularly connecting the microevolutionary variation produced by mutation and development to the macroevolutionary dynamics of divergence and trait change. We will analyze these data with the R package geomorph, and in order to get it into the format that geomorph wants, will have to reshape the data into an array. I've already run this and saved the output file, so you can skip to the next block and simply load the processed data.
+
+
+```{r eval=FALSE}
+.coords <- as.matrix(houledat[,4:27])
+n <- nrow(.coords)
+
+coords <- array(NA, dim=c(p,k,n))
+for(i in 1:n){
+  for(j in 1:p){
+    .k <- seq(1,25, 2)[j]
+    coords[j,1:2,i] <- .coords[i,.k:(.k+1)]
+  }
+}
+dimnames(coords)[[3]] <- houledat$Species
+
+sp_coords <- array(NA, dim=c(p,k,ntaxa))
+
+for(i in 1:ntaxa){
+  .subset <- coords[,,which(houledat$Species==td$phy$tip.label[i])]
+  sp_coords[,,i] <- mshape(.subset)
+}
+dimnames(sp_coords)[[3]] <- td$phy$tip.label
+
+
+
+saveRDS(sp_coords, "../data/sp_coords.rds")
+saveRDS(coords, "../data/coords.rds")
+```
+
+This chunk plots the average shape for each species. 
+
+```{r}
+coords <- readRDS("../data/coords.rds")
+sp_coords <- readRDS("../data/sp_coords.rds")
+plot(0,0, type="n", xlim=c(-600, 600), ylim=c(-400, 400), xlab="", ylab="")
+
+for(i in 1:ntaxa){
+  points(sp_coords[,,i], bg=i, col=i, pch=21)
+}
+
+```
+
+Ordination methods are often used to make sense of the axes of shape evolution. These methods vary in how they use phylogeny. The first is ordinary Principal Components Analysis, which finds the axes of greatest divergence among species, weighting all species equally and ignoring phylogeny. Phylogenetic Princpal Component analysis uses multivariate Brownian motion to estimate the evolutionary rate matrix and takes the leading eigenvector of that matrix, which corresponds to the axis that has evolved the most rapidly over the course of the entire phylogeny. This method does not remove the phylogeny, but only uses it to find the ordination that aligns with the greatest evolutionary divergence rates. As a result, the resulting PPC scores will not be orthogonal. Finally, phylogenetically-aligned component analysis (PACA) finds the axes of variation that maximize phylogenetic signal. While other ordination methods may or may not do this depending on the generating model, PACA makes explicit the goal of finding the primary axis of variation that aligns with phylogenetic signal (as a result, the first few PACA axes often are traits that split early in the phylogeny and define major clades.)
+
+
+```{r}
+PC_houle <- gm.prcomp(sp_coords, phy=td$phy, align.to.phy = FALSE, GLS=FALSE, scale=FALSE)
+PPC_houle <- gm.prcomp(sp_coords, phy=td$phy, align.to.phy = FALSE, GLS=TRUE, scale=FALSE)
+PACA_houle <- gm.prcomp(sp_coords, phy=td$phy, align.to.phy = TRUE, GLS=FALSE, scale=FALSE)
+```
+
+```{r}
+
+fancyTree(td$phy, type="scattergram", X=PC_houle$x[,1:3], ftype="off")
+fancyTree(td$phy, type="scattergram", X=PPC_houle$x[,1:3], ftype="off")
+fancyTree(td$phy, type="scattergram", X=PACA_houle$x[,1:3], ftype="off")
+
+```
+
+This script specifies links between landmarks for visualizations.
+
+```{r}
+links <- matrix(c(1,2,
+                  2,3, 
+                  3,4, 
+                  4,5, 
+                  5,6, 
+                  6,12,
+                  12,7,
+                  7,1,
+                  8,7,
+                  11,9,
+                  9,10,
+                  9,8,
+                  8,2,
+                  11,10,
+                  10,3,
+                  11,4), ncol=2, byrow = TRUE)
+```
+
+Now we can visualize the shape deformations for the PACA ordinations by comparing to the average shape calculated across species. Feel free to compare PC, PPC and PACA deformations to each other by replacing `PACA_houle` with the corresponding `gm.prcomp` object.
+
+```{r}
+
+Y.gpa <- gpagen(sp_coords)
+ref <- mshape(sp_coords)
+par(mfrow=c(2,2), mar=c(0,0,0,0))
+plotRefToTarget(ref, PC_houle$shapes$shapes.comp1$min, links = links, gridPars=gridPar(grid.col="gray60"))#PC1 minimum value
+plotRefToTarget(ref, PC_houle$shapes$shapes.comp2$min, links=links, gridPars=gridPar(grid.col="gray60"))#PC2 minimum value
+plotRefToTarget(ref, PC_houle$shapes$shapes.comp1$max, links=links, gridPars=gridPar(grid.col="gray60"))#PC1 minimum value
+plotRefToTarget(ref, PC_houle$shapes$shapes.comp2$max, links=links, gridPars=gridPar(grid.col="gray60"))#PC2 minimum value
+
+```
+
+For shape data, we could fit a Brownian Motion model just as we did in the multivariate case. However, if the number of landmarks starts to approach the number of species, then the model cannot be estimated. Here we take only the first 3 principal components to fit to a Brownian Motion model. 
+
+```{r}
+mvFit <- mvMORPH::mvBM(td$phy, PC_houle$x[,1:3], model="BM1")
+```
+Finally, the original Houle et al. 2017 paper was primarily interested in whether the axes of shape variation with high within species variance also had the highest divergence. They find this to be the case. We can recreate their primary finding (Figure 4) with these data. 
+```{r}
+gmObj <- PPC_houle #Phylogenetic PCA measures evolutionary divergence
+pcs2fit <- 1:17 #Only look at 17/24 PC axes to drop those with little variance
+
+project_coords <- function (coords, gmObj) {(as.vector(t(coords)) - gmObj$center) %*% gmObj$rotation} #function to project new data on the PC axes provided by gmObj
+proj_coords_PC <- t(apply(coords, 3, project_coords, gmObj)) # Projected coordinates of individual data
+
+Melanogaster <- proj_coords_PC[houledat$Species=="MELANOGASTER_WABASSOWILD",] #selecting only 1 species to estimate within species variation
+P <- var(Melanogaster) #calculate within species variation
+plot(log(diag(P)[pcs2fit],10), log(gmObj$d[pcs2fit],10), xlab="Phenotypic Variance w/in species", ylab="Divergence between species", pch=21, bg="green")
+
+lm1 <- lm(log(gmObj$d[pcs2fit],10) ~ log(diag(P)[pcs2fit],10))
+abline(lm1, col="green")
+```
+
+![Figure 4 from Houle et al. 2017](https://media.springernature.com/lw685/springer-static/image/art%3A10.1038%2Fnature23473/MediaObjects/41586_2017_Article_BFnature23473_Fig4_HTML.jpg?as=webp)
+
+```{r}
+summary(lm1)
+```
+

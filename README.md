@@ -11,6 +11,8 @@ https://www.r-project.org/
 Rstudio:
 https://www.rstudio.com/products/rstudio/download/
 
+Required Packages:
+
 ```
 install.packages("mvMORPH")
 install.packages("geomorph")
